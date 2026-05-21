@@ -1,8 +1,10 @@
 from flask import Flask, jsonify, request
+from datetime import datetime
 
 app = Flask(__name__)
 
 positions = {}
+history = {}
 
 @app.route("/")
 def home():
@@ -26,20 +28,20 @@ def centrale():
         #panel {
             position:absolute; top:10px; right:10px;
             background:white; padding:12px; z-index:999;
-            border-radius:10px; width:310px;
+            border-radius:10px; width:340px;
             box-shadow:0 0 10px #555;
         }
-        .small { font-size: 13px; color: #444; }
-        .sos { color:red; font-weight:bold; }
+        .small { font-size:13px; color:#333; }
+        .sos { color:red; font-weight:bold; font-size:16px; }
     </style>
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
 </head>
 <body>
 
 <div id="panel">
-    <h3>ADRN Centrale</h3>
-    <p><b>Stato:</b> attiva</p>
-    <p><b>Target:</b> tracking realtime</p>
+    <h3>ADRN Centrale SAR</h3>
+    <p><b>Stato:</b> operativa</p>
+    <p><b>Modalità:</b> tracking realtime</p>
     <div id="lista" class="small">In attesa coordinate...</div>
 </div>
 
@@ -54,10 +56,25 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 
 var markers = {};
+var trails = {};
+var autoFollow = true;
 
 L.marker([45.6983, 9.6773]).addTo(map)
 .bindPopup('Centrale ADRN - Bergamo')
 .openPopup();
+
+function creaIcona(sos) {
+    return L.icon({
+        iconUrl: sos
+            ? 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png'
+            : 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+        shadowUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-shadow.png',
+        iconSize: [25, 41],
+        iconAnchor: [12, 41],
+        popupAnchor: [1, -34],
+        shadowSize: [41, 41]
+    });
+}
 
 function aggiornaMappa() {
     fetch('/api/positions')
@@ -67,13 +84,16 @@ function aggiornaMappa() {
 
         Object.keys(data).forEach(id => {
             let p = data[id];
+
             let lat = p.lat;
             let lon = p.lon;
             let tipo = p.tipo || "target";
             let accuracy = p.accuracy || "n.d.";
             let speed = p.speed || "n.d.";
             let heading = p.heading || "n.d.";
+            let battery = p.battery || "n.d.";
             let sos = p.sos || false;
+            let timestamp = p.timestamp || "n.d.";
 
             let popup = "<b>" + id + "</b><br>" +
                         "Tipo: " + tipo + "<br>" +
@@ -82,25 +102,55 @@ function aggiornaMappa() {
                         "Precisione: " + accuracy + " m<br>" +
                         "Velocità: " + speed + "<br>" +
                         "Direzione: " + heading + "<br>" +
+                        "Batteria: " + battery + "%<br>" +
+                        "Ultimo update: " + timestamp + "<br>" +
                         (sos ? "<b style='color:red'>SOS ATTIVO</b>" : "");
 
             if (markers[id]) {
                 markers[id].setLatLng([lat, lon]);
+                markers[id].setIcon(creaIcona(sos));
                 markers[id].bindPopup(popup);
             } else {
-                markers[id] = L.marker([lat, lon]).addTo(map).bindPopup(popup);
+                markers[id] = L.marker([lat, lon], {
+                    icon: creaIcona(sos)
+                }).addTo(map).bindPopup(popup);
+            }
+
+            if (autoFollow) {
+                map.setView([lat, lon], 16);
+            }
+
+            if (sos) {
+                markers[id].openPopup();
             }
 
             testo += "<b>" + id + "</b> - " + tipo + "<br>" +
                      "Lat: " + lat + "<br>" +
                      "Lon: " + lon + "<br>" +
                      "Precisione: " + accuracy + " m<br>" +
+                     "Batteria: " + battery + "%<br>" +
+                     "Ultimo update: " + timestamp + "<br>" +
                      (sos ? "<span class='sos'>SOS ATTIVO</span><br>" : "") +
                      "<br>";
         });
 
         document.getElementById("lista").innerHTML =
             testo || "In attesa coordinate...";
+    });
+
+    fetch('/api/history')
+    .then(r => r.json())
+    .then(storico => {
+        Object.keys(storico).forEach(id => {
+            if (trails[id]) {
+                map.removeLayer(trails[id]);
+            }
+
+            trails[id] = L.polyline(storico[id], {
+                color: 'red',
+                weight: 4
+            }).addTo(map);
+        });
     });
 }
 
@@ -156,6 +206,13 @@ SOS
 
 <script>
 let watchId = null;
+let batteria = "n.d.";
+
+if (navigator.getBattery) {{
+    navigator.getBattery().then(function(battery) {{
+        batteria = Math.round(battery.level * 100);
+    }});
+}}
 
 function inviaPosizione(pos, sos=false) {{
 
@@ -172,6 +229,7 @@ function inviaPosizione(pos, sos=false) {{
             accuracy: pos.coords.accuracy,
             speed: pos.coords.speed,
             heading: pos.coords.heading,
+            battery: batteria,
             sos: sos
         }})
     }})
@@ -181,12 +239,12 @@ function inviaPosizione(pos, sos=false) {{
         "TRACKING ATTIVO<br>" +
         "Lat: " + pos.coords.latitude + "<br>" +
         "Lon: " + pos.coords.longitude + "<br>" +
-        "Precisione: " + Math.round(pos.coords.accuracy) + " m";
+        "Precisione: " + Math.round(pos.coords.accuracy) + " m<br>" +
+        "Batteria: " + batteria + "%";
     }});
 }}
 
 function avviaTracking() {{
-
     if (!navigator.geolocation) {{
         document.getElementById("stato").innerHTML = "GPS non supportato";
         return;
@@ -223,24 +281,39 @@ function inviaSOS() {{
 @app.route("/api/position", methods=["POST"])
 def save_position():
     data = request.json
-
     target_id = data.get("id", "target-1")
 
-    positions[target_id] = {
+    posizione = {
         "lat": data.get("lat"),
         "lon": data.get("lon"),
         "tipo": data.get("tipo", "disperso"),
         "accuracy": data.get("accuracy"),
         "speed": data.get("speed"),
         "heading": data.get("heading"),
-        "sos": data.get("sos", False)
+        "battery": data.get("battery"),
+        "sos": data.get("sos", False),
+        "timestamp": datetime.now().strftime("%H:%M:%S")
     }
+
+    positions[target_id] = posizione
+
+    if target_id not in history:
+        history[target_id] = []
+
+    history[target_id].append([
+        posizione["lat"],
+        posizione["lon"]
+    ])
 
     return jsonify({
         "status": "ok",
         "id": target_id,
-        "data": positions[target_id]
+        "data": posizione
     })
+
+@app.route("/api/history")
+def get_history():
+    return jsonify(history)
 
 @app.route("/api/positions")
 def get_positions():
